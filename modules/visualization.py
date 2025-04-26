@@ -144,79 +144,144 @@ def plot_common_targets_network(common_targets, baicalin_relations, tetrandrine_
     plt.savefig(os.path.join(config.RESULTS_DIR, 'figures', 'common_targets_network.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-def plot_pathway_enrichment(pathway_results):
+def plot_pathway_enrichment(enrichment_results, output_dir='./results/figures'):
     """
-    绘制通路富集分析热图
+    可视化通路富集分析结果
     
     参数:
-    pathway_results - 通路富集分析结果
+    enrichment_results - 富集分析结果
+    output_dir - 输出目录
     """
-    # 提取通路参与度数据
-    pathway_involvement = pathway_results['pathway_involvement']
-    pathway_enrichment = pathway_results['pathway_enrichment']
+    import os
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    from matplotlib.colors import LinearSegmentedColormap
     
-    # 1. 绘制靶点-通路热图
-    plt.figure(figsize=(14, 10))
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 准备热图数据
-    heatmap_data = pathway_involvement[['Target_Name', 'Inflammatory_Score', 'Oxidative_Stress_Score', 'Apoptosis_Score', 
-                                        'Fibrosis_Score', 'Liver_Metabolism_Score', 'Kidney_Function_Score']]
+    # 从结果中获取数据框
+    if isinstance(enrichment_results, dict):
+        enrichment_df = enrichment_results.get('enrichment_results', None)
+        gene_pathway_df = enrichment_results.get('gene_pathway_mapping', None)
+    else:
+        enrichment_df = enrichment_results
+        gene_pathway_df = None
     
-    # 重命名列以便显示
-    heatmap_data = heatmap_data.rename(columns={
-        'Inflammatory_Score': '炎症通路',
-        'Oxidative_Stress_Score': '氧化应激通路',
-        'Apoptosis_Score': '细胞凋亡通路',
-        'Fibrosis_Score': '纤维化通路',
-        'Liver_Metabolism_Score': '肝脏代谢通路',
-        'Kidney_Function_Score': '肾脏功能通路'
-    })
+    if enrichment_df is None or enrichment_df.empty:
+        print("错误: 没有富集结果可供可视化")
+        return
     
-    # 设置靶点名称为索引
-    heatmap_data = heatmap_data.set_index('Target_Name')
+    print(f"正在可视化 {len(enrichment_df)} 个富集通路的结果...")
     
-    # 创建热图
-    sns.heatmap(heatmap_data, cmap='YlGnBu', annot=True, fmt='.2f', linewidths=.5)
-    plt.title('共同靶点的通路参与度热图', fontsize=15)
-    plt.ylabel('靶点')
-    plt.xlabel('生物学通路')
-    plt.tight_layout()
-    
-    # 保存图像
-    plt.savefig(os.path.join(config.RESULTS_DIR, 'figures', 'pathway_involvement_heatmap.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # 2. 绘制通路富集柱状图
+    # 1. 绘制富集气泡图
     plt.figure(figsize=(12, 8))
     
-    # 准备数据
-    pathways = ['炎症通路', '氧化应激通路', '细胞凋亡通路', '纤维化通路', '肝脏代谢通路', '肾脏功能通路']
-    enrichment_values = [
-        pathway_enrichment['Inflammatory_Pathway'],
-        pathway_enrichment['Oxidative_Stress_Pathway'],
-        pathway_enrichment['Apoptosis_Pathway'],
-        pathway_enrichment['Fibrosis_Pathway'],
-        pathway_enrichment['Liver_Metabolism_Pathway'],
-        pathway_enrichment['Kidney_Function_Pathway']
-    ]
+    # 只显示前10个通路
+    if len(enrichment_df) > 10:
+        plot_df = enrichment_df.head(10)
+    else:
+        plot_df = enrichment_df
     
-    # 绘制柱状图
-    bars = plt.bar(pathways, enrichment_values, color=sns.color_palette("YlGnBu", 6))
+    # 转换P值为负对数
+    plot_df['NegLogP'] = -np.log10(plot_df['P_Value'])
     
-    # 添加数值标签
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                 f'{height:.2f}', ha='center', va='bottom', fontsize=10)
+    # 绘制气泡图
+    sns.scatterplot(
+        x='Fold_Enrichment',
+        y='Pathway',
+        size='Hits',
+        hue='NegLogP',
+        sizes=(50, 400),
+        palette='viridis',
+        data=plot_df
+    )
     
-    plt.title('生物学通路富集程度', fontsize=15)
-    plt.ylabel('富集分数')
-    plt.ylim(0, max(enrichment_values) * 1.2)
+    plt.title('Pathway Enrichment Analysis', fontsize=16)
+    plt.xlabel('Fold Enrichment', fontsize=14)
+    plt.ylabel('Pathway', fontsize=14)
+    plt.legend(title='-log10(P-value)', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    
-    # 保存图像
-    plt.savefig(os.path.join(config.RESULTS_DIR, 'figures', 'pathway_enrichment_barplot.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'pathway_enrichment_bubble.png'), dpi=300, bbox_inches='tight')
     plt.close()
+    
+    # 2. 绘制热图 (如果有基因-通路映射)
+    if gene_pathway_df is not None and not gene_pathway_df.empty:
+        # 创建一个透视表：基因 × 通路
+        try:
+            pivot_df = gene_pathway_df.pivot_table(
+                index='Gene', 
+                columns='Pathway', 
+                values='Score',
+                fill_value=0
+            )
+            
+            # 如果透视表太大，只选择前20个基因和前8个通路
+            if pivot_df.shape[0] > 20:
+                # 选择出现在最多通路中的前20个基因
+                gene_counts = gene_pathway_df['Gene'].value_counts().head(20)
+                top_genes = gene_counts.index.tolist()
+                pivot_df = pivot_df.loc[top_genes]
+            
+            if pivot_df.shape[1] > 8:
+                # 选择最富集的前8个通路
+                top_pathways = enrichment_df['Pathway'].head(8).tolist()
+                pivot_df = pivot_df[top_pathways]
+            
+            # 设置图形大小
+            plt.figure(figsize=(12, 10))
+            
+            # 创建自定义颜色映射
+            colors = ['#ffffff', '#ffffcc', '#ffeda0', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#bd0026', '#800026']
+            cmap = LinearSegmentedColormap.from_list('custom_cmap', colors)
+            
+            # 绘制热图
+            sns.heatmap(
+                pivot_df,
+                cmap=cmap,
+                linewidths=0.5,
+                linecolor='gray',
+                square=True,
+                cbar_kws={'label': 'Association Score'}
+            )
+            
+            plt.title('Gene-Pathway Association Heatmap', fontsize=16)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'gene_pathway_heatmap.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            print(f"绘制热图时出错: {e}")
+    
+    # 3. 绘制条形图
+    plt.figure(figsize=(10, 8))
+    
+    # 按富集倍数排序
+    plot_df = plot_df.sort_values('Fold_Enrichment')
+    
+    # 绘制条形图
+    bars = plt.barh(plot_df['Pathway'], plot_df['Fold_Enrichment'], color='skyblue')
+    
+    # 在条形上标注P值
+    for i, bar in enumerate(bars):
+        plt.text(
+            bar.get_width() + 0.1,
+            bar.get_y() + bar.get_height()/2,
+            f"p={plot_df.iloc[i]['P_Value']:.1e}",
+            va='center',
+            fontsize=9
+        )
+    
+    plt.title('Pathway Enrichment Analysis', fontsize=16)
+    plt.xlabel('Fold Enrichment', fontsize=14)
+    plt.ylabel('Pathway', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'pathway_enrichment_bars.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"通路富集可视化完成，图像已保存至: {output_dir}")
 
 def plot_synergy_mechanisms(synergy_results):
     """
@@ -368,6 +433,7 @@ def plot_synergy_mechanisms(synergy_results):
     plt.savefig(os.path.join(save_dir, 'synergy_coefficients.png'), dpi=300, bbox_inches='tight')
     
     plt.close('all')
+
 def plot_key_synergy_genes(synergy_results):
     """
     绘制关键协同增效减毒基因可视化图
@@ -378,140 +444,253 @@ def plot_key_synergy_genes(synergy_results):
     import matplotlib.pyplot as plt
     import numpy as np
     import os
+    import traceback
+    
+    print("\n===== 开始绘制关键协同基因图表 =====")
+    
+    # 解决字体问题
+    try:
+        # 尝试多种可能的中文字体
+        font_found = False
+        chinese_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'AR PL UMing CN', 'NSimSun', 'STSong']
+        
+        for font in chinese_fonts:
+            try:
+                plt.rcParams['font.sans-serif'] = [font]  # 用来正常显示中文标签
+                plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+                # 测试是否成功设置字体
+                fig, ax = plt.subplots(figsize=(1, 1))
+                ax.set_title('测试')
+                plt.close(fig)
+                print(f"成功设置中文字体: {font}")
+                font_found = True
+                break
+            except Exception as e:
+                print(f"尝试设置字体{font}失败: {e}")
+                continue
+        
+        if not font_found:
+            # 如果所有中文字体都失败，使用系统默认字体
+            print("无法找到中文字体，使用系统默认字体")
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
+    except Exception as e:
+        print(f"设置字体时出错: {e}")
+        # 使用安全的默认设置
+        plt.rcParams.update({'font.sans-serif': ['DejaVu Sans', 'Arial']})
     
     # 提取数据
-    therapeutic_genes = synergy_results.get('therapeutic_genes', [])
-    hepatoprotective_genes = synergy_results.get('hepatoprotective_genes', [])
-    nephroprotective_genes = synergy_results.get('nephroprotective_genes', [])
+    try:
+        print("提取协同分析结果数据...")
+        therapeutic_genes = synergy_results.get('therapeutic_genes', [])
+        hepatoprotective_genes = synergy_results.get('hepatoprotective_genes', [])
+        nephroprotective_genes = synergy_results.get('nephroprotective_genes', [])
+        
+        print(f"- 治疗基因: {len(therapeutic_genes)}个")
+        print(f"- 肝保护基因: {len(hepatoprotective_genes)}个")
+        print(f"- 肾保护基因: {len(nephroprotective_genes)}个")
+    except Exception as e:
+        print(f"提取数据时出错: {e}")
+        traceback.print_exc()
+        return
     
     # 创建保存目录
     save_dir = os.path.join('results', 'figures')
     os.makedirs(save_dir, exist_ok=True)
+    print(f"图表将保存到: {save_dir}")
     
     # 检查是否有数据可绘制
     if not therapeutic_genes and not hepatoprotective_genes and not nephroprotective_genes:
         print("没有足够的基因数据用于可视化")
         return
     
-    # 绘制治疗效应关键基因
-    if therapeutic_genes:
-        fig, ax = plt.subplots(figsize=(12, 8))
+    try:
+        # 绘制治疗效应关键基因
+        if therapeutic_genes:
+            print("绘制治疗效应关键基因图...")
+            
+            try:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                # 提取数据
+                genes = [gene.get('gene_name', f"未知基因_{i}") for i, gene in enumerate(therapeutic_genes)]
+                scores = [gene.get('importance_score', 0) for gene in therapeutic_genes]
+                
+                print(f"- 基因名称: {genes}")
+                print(f"- 重要性评分: {scores}")
+                
+                # 如果没有有效数据，跳过绘图
+                if not genes or not scores or len(genes) != len(scores):
+                    print(f"警告: 治疗基因数据不完整，跳过绘图")
+                    plt.close(fig)
+                else:
+                    # 创建条形图
+                    bars = ax.barh(genes, scores, color='green', alpha=0.7)
+                    
+                    # 添加数值标签
+                    for bar in bars:
+                        width = bar.get_width()
+                        ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
+                                f'{width:.3f}', va='center')
+                    
+                    # 添加标签和标题
+                    ax.set_xlabel('Importance Score', fontsize=12)
+                    ax.set_ylabel('Gene Name', fontsize=12)
+                    ax.set_title('Key Genes for Silicosis Treatment', fontsize=14, fontweight='bold')
+                    
+                    # 添加网格
+                    ax.grid(axis='x', linestyle='--', alpha=0.6)
+                    
+                    # 保存图形
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_dir, 'therapeutic_genes.png'), dpi=300, bbox_inches='tight')
+                    print(f"治疗效应关键基因图保存到: {os.path.join(save_dir, 'therapeutic_genes.png')}")
+                    plt.close()
+            except Exception as e:
+                print(f"绘制治疗效应图时出错: {e}")
+                traceback.print_exc()
+                try:
+                    plt.close()
+                except:
+                    pass
         
-        # 提取数据
-        genes = [gene['gene_name'] for gene in therapeutic_genes]
-        scores = [gene['importance_score'] for gene in therapeutic_genes]
+        # 绘制肝保护关键基因
+        if hepatoprotective_genes:
+            print("绘制肝保护关键基因图...")
+            
+            try:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                # 提取数据
+                genes = [gene.get('gene_name', f"未知基因_{i}") for i, gene in enumerate(hepatoprotective_genes)]
+                scores = [gene.get('importance_score', 0) for gene in hepatoprotective_genes]
+                
+                # 如果没有有效数据，跳过绘图
+                if not genes or not scores or len(genes) != len(scores):
+                    print(f"警告: 肝保护基因数据不完整，跳过绘图")
+                    plt.close(fig)
+                else:
+                    # 创建条形图
+                    bars = ax.barh(genes, scores, color='blue', alpha=0.7)
+                    
+                    # 添加数值标签
+                    for bar in bars:
+                        width = bar.get_width()
+                        ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
+                                f'{width:.3f}', va='center')
+                    
+                    # 添加标签和标题
+                    ax.set_xlabel('Importance Score', fontsize=12)
+                    ax.set_ylabel('Gene Name', fontsize=12)
+                    ax.set_title('Key Genes for Hepatoprotection', fontsize=14, fontweight='bold')
+                    
+                    # 添加网格
+                    ax.grid(axis='x', linestyle='--', alpha=0.6)
+                    
+                    # 保存图形
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_dir, 'hepatoprotective_genes.png'), dpi=300, bbox_inches='tight')
+                    print(f"肝保护关键基因图保存到: {os.path.join(save_dir, 'hepatoprotective_genes.png')}")
+                    plt.close()
+            except Exception as e:
+                print(f"绘制肝保护图时出错: {e}")
+                traceback.print_exc()
+                try:
+                    plt.close()
+                except:
+                    pass
         
-        # 创建条形图
-        bars = ax.barh(genes, scores, color='green', alpha=0.7)
+        # 绘制肾保护关键基因
+        if nephroprotective_genes:
+            print("绘制肾保护关键基因图...")
+            
+            try:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                # 提取数据
+                genes = [gene.get('gene_name', f"未知基因_{i}") for i, gene in enumerate(nephroprotective_genes)]
+                scores = [gene.get('importance_score', 0) for gene in nephroprotective_genes]
+                
+                # 如果没有有效数据，跳过绘图
+                if not genes or not scores or len(genes) != len(scores):
+                    print(f"警告: 肾保护基因数据不完整，跳过绘图")
+                    plt.close(fig)
+                else:
+                    # 创建条形图
+                    bars = ax.barh(genes, scores, color='purple', alpha=0.7)
+                    
+                    # 添加数值标签
+                    for bar in bars:
+                        width = bar.get_width()
+                        ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
+                                f'{width:.3f}', va='center')
+                    
+                    # 添加标签和标题
+                    ax.set_xlabel('Importance Score', fontsize=12)
+                    ax.set_ylabel('Gene Name', fontsize=12)
+                    ax.set_title('Key Genes for Nephroprotection', fontsize=14, fontweight='bold')
+                    
+                    # 添加网格
+                    ax.grid(axis='x', linestyle='--', alpha=0.6)
+                    
+                    # 保存图形
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_dir, 'nephroprotective_genes.png'), dpi=300, bbox_inches='tight')
+                    print(f"肾保护关键基因图保存到: {os.path.join(save_dir, 'nephroprotective_genes.png')}")
+                    plt.close()
+            except Exception as e:
+                print(f"绘制肾保护图时出错: {e}")
+                traceback.print_exc()
+                try:
+                    plt.close()
+                except:
+                    pass
         
-        # 添加数值标签
-        for bar in bars:
-            width = bar.get_width()
-            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
-                    f'{width:.3f}', va='center')
+        # 绘制三种类型基因的对比图
+        print("绘制基因类型对比图...")
         
-        # 添加标签和标题
-        ax.set_xlabel('重要性评分', fontsize=12)
-        ax.set_ylabel('基因名称', fontsize=12)
-        ax.set_title('硅肺病治疗关键协同基因', fontsize=14, fontweight='bold')
+        try:
+            fig, ax = plt.subplots(figsize=(15, 10))
+            
+            # 数据准备
+            gene_types = ['Therapeutic', 'Hepatoprotective', 'Nephroprotective']
+            gene_counts = [
+                len(therapeutic_genes),
+                len(hepatoprotective_genes),
+                len(nephroprotective_genes)
+            ]
+            
+            # 创建条形图
+            bars = ax.bar(gene_types, gene_counts, color=['green', 'blue', 'purple'], alpha=0.7)
+            
+            # 添加数量标签
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2, height + 0.1,
+                        f'{int(height)}', ha='center', va='bottom')
+            
+            # 添加标签和标题
+            ax.set_xlabel('Effect Type', fontsize=14)
+            ax.set_ylabel('Key Gene Count', fontsize=14)
+            ax.set_title('Key Synergistic Gene Counts by Effect Type', fontsize=16, fontweight='bold')
+            
+            # 添加网格
+            ax.grid(axis='y', linestyle='--', alpha=0.6)
+            
+            # 保存图形
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'gene_type_comparison.png'), dpi=300, bbox_inches='tight')
+            print(f"基因类型对比图保存到: {os.path.join(save_dir, 'gene_type_comparison.png')}")
+            plt.close()
+        except Exception as e:
+            print(f"绘制类型对比图时出错: {e}")
+            traceback.print_exc()
+            try:
+                plt.close()
+            except:
+                pass
         
-        # 添加网格
-        ax.grid(axis='x', linestyle='--', alpha=0.6)
-        
-        # 保存图形
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'therapeutic_genes.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # 绘制肝保护关键基因
-    if hepatoprotective_genes:
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # 提取数据
-        genes = [gene['gene_name'] for gene in hepatoprotective_genes]
-        scores = [gene['importance_score'] for gene in hepatoprotective_genes]
-        
-        # 创建条形图
-        bars = ax.barh(genes, scores, color='blue', alpha=0.7)
-        
-        # 添加数值标签
-        for bar in bars:
-            width = bar.get_width()
-            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
-                    f'{width:.3f}', va='center')
-        
-        # 添加标签和标题
-        ax.set_xlabel('重要性评分', fontsize=12)
-        ax.set_ylabel('基因名称', fontsize=12)
-        ax.set_title('肝保护关键协同基因', fontsize=14, fontweight='bold')
-        
-        # 添加网格
-        ax.grid(axis='x', linestyle='--', alpha=0.6)
-        
-        # 保存图形
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'hepatoprotective_genes.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # 绘制肾保护关键基因
-    if nephroprotective_genes:
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # 提取数据
-        genes = [gene['gene_name'] for gene in nephroprotective_genes]
-        scores = [gene['importance_score'] for gene in nephroprotective_genes]
-        
-        # 创建条形图
-        bars = ax.barh(genes, scores, color='purple', alpha=0.7)
-        
-        # 添加数值标签
-        for bar in bars:
-            width = bar.get_width()
-            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
-                    f'{width:.3f}', va='center')
-        
-        # 添加标签和标题
-        ax.set_xlabel('重要性评分', fontsize=12)
-        ax.set_ylabel('基因名称', fontsize=12)
-        ax.set_title('肾保护关键协同基因', fontsize=14, fontweight='bold')
-        
-        # 添加网格
-        ax.grid(axis='x', linestyle='--', alpha=0.6)
-        
-        # 保存图形
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'nephroprotective_genes.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # 绘制三种类型基因的对比图
-    fig, ax = plt.subplots(figsize=(15, 10))
-    
-    # 数据准备
-    gene_types = ['治疗效应', '肝保护效应', '肾保护效应']
-    gene_counts = [
-        len(therapeutic_genes),
-        len(hepatoprotective_genes),
-        len(nephroprotective_genes)
-    ]
-    
-    # 创建条形图
-    bars = ax.bar(gene_types, gene_counts, color=['green', 'blue', 'purple'], alpha=0.7)
-    
-    # 添加数量标签
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2, height + 0.1,
-                f'{int(height)}', ha='center', va='bottom')
-    
-    # 添加标签和标题
-    ax.set_xlabel('作用类型', fontsize=14)
-    ax.set_ylabel('关键基因数量', fontsize=14)
-    ax.set_title('不同作用类型的关键协同基因数量', fontsize=16, fontweight='bold')
-    
-    # 添加网格
-    ax.grid(axis='y', linestyle='--', alpha=0.6)
-    
-    # 保存图形
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'gene_type_comparison.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+        print("===== 关键协同基因图表绘制完成 =====\n")
+    except Exception as e:
+        print(f"绘制图表时出现未预期的错误: {e}")
+        traceback.print_exc()
+

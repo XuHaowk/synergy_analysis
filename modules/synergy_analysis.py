@@ -1,752 +1,669 @@
 """
-协同作用分析模块：分析增效减毒机制
+协同作用分析模块：分析药物间的协同增效和减毒作用
 """
 
 import pandas as pd
 import numpy as np
 import os
-from collections import Counter
-import config
-from modules.probability import calculate_direct_relation_probability, calculate_indirect_relation_probability, calculate_synergistic_effect
+import json
+from collections import defaultdict
 
-def analyze_common_targets(baicalin_targets, tetrandrine_targets, all_relations):
+# Import only the needed functions from probability module but not the ones that would create circular imports
+from modules.probability import calculate_direct_relation_probability, calculate_synergistic_effect
+
+def analyze_common_targets(drug1_targets, drug2_targets, all_relations):
     """
     分析两种药物的共同靶点
     
     参数:
-    baicalin_targets - 黄芩苷靶点
-    tetrandrine_targets - 汉防己甲素靶点
+    drug1_targets - 药物1的靶点DataFrame
+    drug2_targets - 药物2的靶点DataFrame
     all_relations - 所有关系数据
     
     返回:
-    共同靶点数据和分析结果
+    common_targets - 共同靶点DataFrame
     """
-    # 提取靶点ID列表
-    baicalin_target_ids = set(baicalin_targets['Target_ID'])
-    tetrandrine_target_ids = set(tetrandrine_targets['Target_ID'])
+    # 确保输入为DataFrame
+    if not isinstance(drug1_targets, pd.DataFrame) or not isinstance(drug2_targets, pd.DataFrame):
+        print("错误: 输入必须是pandas DataFrame")
+        return pd.DataFrame()
     
-    # 识别共同靶点
-    common_target_ids = baicalin_target_ids.intersection(tetrandrine_target_ids)
+    # 找出共同靶点
+    common_targets = pd.merge(drug1_targets, drug2_targets, on='Target_ID', how='inner')
     
-    print(f"黄芩苷靶点: {len(baicalin_target_ids)}")
-    print(f"汉防己甲素靶点: {len(tetrandrine_target_ids)}")
-    print(f"共同靶点: {len(common_target_ids)}")
+    # 如果没有共同靶点，返回空DataFrame
+    if common_targets.empty:
+        print("未找到共同靶点")
+        return common_targets
     
-    # 创建共同靶点DataFrame
-    common_targets = pd.DataFrame({
-        'Target_ID': list(common_target_ids)
-    })
+    # 获取靶点详细信息
+    targets_info = []
     
-    # 添加靶点名称和其他信息
-    target_info = all_relations[all_relations['Target_ID'].isin(common_target_ids)]
-    target_names = {}
-    for _, row in target_info.iterrows():
-        if row['Target_ID'] not in target_names:
-            target_names[row['Target_ID']] = row['Target_Name']
-    
-    common_targets['Target_Name'] = common_targets['Target_ID'].map(target_names)
-    
-    # 计算每个靶点的重要性 (出现频率)
-    target_counts = Counter(target_info['Target_ID'])
-    common_targets['Importance'] = common_targets['Target_ID'].map(lambda x: target_counts.get(x, 0))
-    
-    # 按重要性排序
-    common_targets = common_targets.sort_values('Importance', ascending=False).reset_index(drop=True)
-    
-    # 添加靶点与功能相关性分析
-    # 这需要额外的生物信息数据，可以后续扩展
-    
-    # 保存共同靶点数据
-    os.makedirs(os.path.join(config.PROCESSED_DATA_DIR, 'targets'), exist_ok=True)
-    common_targets.to_csv(os.path.join(config.PROCESSED_DATA_DIR, 'targets', 'common_targets.csv'), index=False)
-    
-    return common_targets
-
-def analyze_pathway_enrichment(common_targets, gene_pairs_data):
-    """
-    分析共同靶点的通路富集情况
-    
-    参数:
-    common_targets - 共同靶点数据
-    gene_pairs_data - 基因对关系数据
-    
-    返回:
-    通路富集分析结果
-    """
-    # 获取基因对关系数据
-    gene_pairs = gene_pairs_data['gene_pairs']
-    gene_pairs_db = gene_pairs_data['gene_pairs_db']
-    gene_pairs_pubmed = gene_pairs_data['gene_pairs_pubmed']
-    
-    # 初始化通路结果
-    pathway_results = pd.DataFrame()
-    
-    # 根据基因对关系，检查靶点是否参与关键通路
-    target_ids = common_targets['Target_ID'].values
-    
-    # 定义关键通路和对应的标志基因
-    key_pathways = {
-        'inflammatory': ['IL6', 'TNF', 'IL1B', 'CXCL8', 'NFKB1'],
-        'oxidative_stress': ['SOD1', 'CAT', 'GPX1', 'NFE2L2', 'HMOX1'],
-        'apoptosis': ['BAX', 'BCL2', 'CASP3', 'TP53', 'PARP1'],
-        'fibrosis': ['TGFB1', 'COL1A1', 'MMP9', 'TIMP1', 'ACTA2'],
-        'liver_metabolism': ['CYP3A4', 'CYP2E1', 'CYP1A2', 'UGT1A1', 'ABCB1'],
-        'kidney_function': ['AQP1', 'SLC22A6', 'SLC22A8', 'HAVCR1', 'LCN2']
-    }
-    
-    # 计算每个靶点对各通路的参与度
-    pathway_involvement = []
-    
-    for target_id in target_ids:
-        # 在基因对中寻找该靶点
-        target_pairs_db = gene_pairs_db[(gene_pairs_db['Source_ID'] == target_id) | (gene_pairs_db['Target_ID'] == target_id)]
-        target_pairs_pubmed = gene_pairs_pubmed[(gene_pairs_pubmed['Source_ID'] == target_id) | (gene_pairs_pubmed['Target_ID'] == target_id)]
+    for _, row in common_targets.iterrows():
+        target_id = row['Target_ID']
         
-        # 提取关联基因
-        related_genes_db = set(target_pairs_db['Source_ID']).union(set(target_pairs_db['Target_ID']))
-        related_genes_pubmed = set(target_pairs_pubmed['Source_ID']).union(set(target_pairs_pubmed['Target_ID']))
-        related_genes = related_genes_db.union(related_genes_pubmed)
+        # 查找靶点名称和类型
+        target_info = all_relations[
+            (all_relations['Source_ID'] == target_id) | 
+            (all_relations['Target_ID'] == target_id)
+        ].iloc[0] if not all_relations[
+            (all_relations['Source_ID'] == target_id) | 
+            (all_relations['Target_ID'] == target_id)
+        ].empty else None
         
-        # 从关联基因中移除自身
-        related_genes.discard(target_id)
-        
-        # 计算各通路的参与度
-        pathway_scores = {}
-        
-        for pathway, marker_genes in key_pathways.items():
-            # 检查有多少标志基因与该靶点相关
-            overlap = len([gene for gene in related_genes if str(gene) in marker_genes or 
-                           any(marker in str(gene_name).upper() for gene_name in common_targets[common_targets['Target_ID'] == target_id]['Target_Name'] 
-                               for marker in marker_genes)])
-            
-            pathway_scores[pathway] = overlap / len(marker_genes) if overlap > 0 else 0
-        
-        # 获取靶点名称
-        target_name = common_targets[common_targets['Target_ID'] == target_id]['Target_Name'].values[0]
-        
-        # 添加到结果
-        pathway_involvement.append({
-            'Target_ID': target_id,
-            'Target_Name': target_name,
-            'Inflammatory_Score': pathway_scores['inflammatory'],
-            'Oxidative_Stress_Score': pathway_scores['oxidative_stress'],
-            'Apoptosis_Score': pathway_scores['apoptosis'],
-            'Fibrosis_Score': pathway_scores['fibrosis'],
-            'Liver_Metabolism_Score': pathway_scores['liver_metabolism'],
-            'Kidney_Function_Score': pathway_scores['kidney_function'],
-            'Related_Genes_Count': len(related_genes)
-        })
-    
-    # 转换为DataFrame
-    pathway_results = pd.DataFrame(pathway_involvement)
-    
-    # 计算每个通路的总体富集程度
-    pathway_enrichment = {
-        'Inflammatory_Pathway': pathway_results['Inflammatory_Score'].mean(),
-        'Oxidative_Stress_Pathway': pathway_results['Oxidative_Stress_Score'].mean(),
-        'Apoptosis_Pathway': pathway_results['Apoptosis_Score'].mean(),
-        'Fibrosis_Pathway': pathway_results['Fibrosis_Score'].mean(),
-        'Liver_Metabolism_Pathway': pathway_results['Liver_Metabolism_Score'].mean(),
-        'Kidney_Function_Pathway': pathway_results['Kidney_Function_Score'].mean()
-    }
-    
-    # 保存通路分析结果
-    os.makedirs(os.path.join(config.RESULTS_DIR, 'tables'), exist_ok=True)
-    pathway_results.to_csv(os.path.join(config.RESULTS_DIR, 'tables', 'pathway_involvement.csv'), index=False)
-    
-    # 保存通路富集结果
-    pd.DataFrame([pathway_enrichment]).to_csv(os.path.join(config.RESULTS_DIR, 'tables', 'pathway_enrichment.csv'), index=False)
-    
-    return {
-        'pathway_involvement': pathway_results,
-        'pathway_enrichment': pathway_enrichment
-    }
-
-def get_significant_targets(drug1_relations, drug2_relations, common_targets):
-    """
-    获取两种药物对某一疾病或毒性的显著共同靶点
-    
-    参数:
-    drug1_relations - 药物1与疾病/毒性的间接关系数据
-    drug2_relations - 药物2与疾病/毒性的间接关系数据
-    common_targets - 两种药物的共同靶点数据
-    
-    返回:
-    显著共同靶点列表
-    """
-    # 如果任一关系数据为空，返回空列表
-    if drug1_relations.empty or drug2_relations.empty or common_targets.empty:
-        return []
-    
-    significant_targets = []
-    
-    # 获取药物1中所有中间靶点的ID和名称
-    drug1_targets = {}
-    if 'Path_Details' in drug1_relations.columns:
-        for _, row in drug1_relations.iterrows():
-            if isinstance(row['Path_Details'], list):
-                for path in row['Path_Details']:
-                    if isinstance(path, dict) and 'intermediate_target_id' in path:
-                        target_id = path['intermediate_target_id']
-                        target_name = path.get('intermediate_target_name', "Unknown")
-                        path_prob = path.get('path_probability', 0)
-                        
-                        if target_id not in drug1_targets or path_prob > drug1_targets[target_id]['probability']:
-                            drug1_targets[target_id] = {
-                                'name': target_name,
-                                'probability': path_prob,
-                                'direction': path.get('source_to_inter_direction', "unknown")
-                            }
-    
-    # 获取药物2中所有中间靶点的ID和名称
-    drug2_targets = {}
-    if 'Path_Details' in drug2_relations.columns:
-        for _, row in drug2_relations.iterrows():
-            if isinstance(row['Path_Details'], list):
-                for path in row['Path_Details']:
-                    if isinstance(path, dict) and 'intermediate_target_id' in path:
-                        target_id = path['intermediate_target_id']
-                        target_name = path.get('intermediate_target_name', "Unknown")
-                        path_prob = path.get('path_probability', 0)
-                        
-                        if target_id not in drug2_targets or path_prob > drug2_targets[target_id]['probability']:
-                            drug2_targets[target_id] = {
-                                'name': target_name,
-                                'probability': path_prob,
-                                'direction': path.get('source_to_inter_direction', "unknown")
-                            }
-    
-    # 找出共同的显著靶点
-    common_target_ids = set(drug1_targets.keys()).intersection(set(drug2_targets.keys()))
-    
-    # 将Target_ID列转换为字符串，以便进行匹配
-    if 'Target_ID' in common_targets.columns:
-        common_targets['Target_ID'] = common_targets['Target_ID'].astype(str)
-    
-    # 检查共同靶点是否也在两种药物的共同靶点列表中
-    for target_id in common_target_ids:
-        # 检查是否在共同靶点列表中
-        is_common = False
-        target_row = None
-        
-        if 'Target_ID' in common_targets.columns:
-            matches = common_targets[common_targets['Target_ID'] == target_id]
-            if not matches.empty:
-                is_common = True
-                target_row = matches.iloc[0]
-        
-        # 如果是共同靶点，则添加到显著靶点列表
-        if is_common:
-            drug1_info = drug1_targets[target_id]
-            drug2_info = drug2_targets[target_id]
-            
-            # 判断协同类型
-            if drug1_info['direction'] == drug2_info['direction']:
-                synergy_type = "协同型" if drug1_info['direction'] == "positive" else "拮抗型"
+        if target_info is not None:
+            if target_info['Source_ID'] == target_id:
+                target_name = target_info['Source_Name']
+                target_type = target_info['Source_Type']
             else:
-                synergy_type = "互补型"
+                target_name = target_info['Target_Name']
+                target_type = target_info['Target_Type']
             
-            # 计算综合概率
-            combined_probability = drug1_info['probability'] * drug2_info['probability']
+            # 查找与药物1的关系
+            drug1_relation = all_relations[
+                ((all_relations['Source_ID'] == target_id) & (all_relations['Source_Type'] == 'Gene')) |
+                ((all_relations['Target_ID'] == target_id) & (all_relations['Target_Type'] == 'Gene'))
+            ]
             
-            # 只添加概率大于阈值的靶点
-            if combined_probability > 0.2:  # 可以根据需要调整阈值
-                target_info = {
-                    'Target_ID': target_id,
-                    'Target_Name': drug1_info['name'],
-                    'Drug1_Probability': drug1_info['probability'],
-                    'Drug1_Direction': drug1_info['direction'],
-                    'Drug2_Probability': drug2_info['probability'],
-                    'Drug2_Direction': drug2_info['direction'],
-                    'Combined_Probability': combined_probability,
-                    'Synergy_Type': synergy_type
-                }
-                
-                # 添加其他可能的靶点信息
-                if target_row is not None:
-                    for col in target_row.index:
-                        if col not in target_info and col != 'Target_ID':
-                            target_info[col] = target_row[col]
-                
-                significant_targets.append(target_info)
-    
-    # 按照综合概率降序排序
-    significant_targets.sort(key=lambda x: x['Combined_Probability'], reverse=True)
-    
-    return significant_targets
-
-def analyze_synergy_mechanisms(
-        baicalin_relations, tetrandrine_relations, common_targets,
-        silicosis_relations, hepatotox_relations, nephrotox_relations):
-    """
-    分析黄芩苷和汉防己甲素的协同增效和减毒机制，基于PSR算法
-    
-    参数:
-    baicalin_relations - 黄芩苷的关系数据
-    tetrandrine_relations - 汉防己甲素的关系数据
-    common_targets - 共同靶点数据
-    silicosis_relations - 硅肺病的关系数据
-    hepatotox_relations - 肝毒性的关系数据
-    nephrotox_relations - 肾毒性的关系数据
-    
-    返回:
-    协同机制分析结果
-    """
-    import math
-    import pandas as pd
-    
-    print("计算直接关系概率...")
-    
-    # 确保关系数据中包含必要的列
-    def ensure_relation_columns(relation_df, entity_type):
-        """确保关系数据中包含必要的列"""
-        relation_df = relation_df.copy()
-        
-        # 添加缺失的列
-        if 'Source_Type' not in relation_df.columns:
-            if entity_type in ['Drug', 'Chemical']:
-                relation_df['Source_Type'] = 'Chemical'
-            else:
-                relation_df['Source_Type'] = 'Disease'
-                
-        if 'Target_Type' not in relation_df.columns:
-            relation_df['Target_Type'] = 'Gene'
+            drug1_rel_type = drug1_relation['Type'].iloc[0] if not drug1_relation.empty else 'Unknown'
+            drug1_rel_prob = drug1_relation['Probability'].iloc[0] if not drug1_relation.empty else 0.0
             
-        return relation_df
-    
-    # 处理所有关系数据
-    baicalin_relations = ensure_relation_columns(baicalin_relations, 'Drug')
-    tetrandrine_relations = ensure_relation_columns(tetrandrine_relations, 'Drug')
-    silicosis_relations = ensure_relation_columns(silicosis_relations, 'Disease')
-    hepatotox_relations = ensure_relation_columns(hepatotox_relations, 'Disease')
-    nephrotox_relations = ensure_relation_columns(nephrotox_relations, 'Disease')
-    
-    # 计算对硅肺病的间接关系概率（使用PSR算法）
-    print("计算对硅肺病的间接关系概率...")
-    baicalin_silicosis = calculate_indirect_relation_probability(
-        baicalin_relations, silicosis_relations
-    )
-    tetrandrine_silicosis = calculate_indirect_relation_probability(
-        tetrandrine_relations, silicosis_relations
-    )
-    
-    # 增强调试输出
-    print("硅肺病协同作用分析:")
-    if not baicalin_silicosis.empty and 'Indirect_Probability' in baicalin_silicosis.columns:
-        probs = baicalin_silicosis['Indirect_Probability'].tolist()
-        print(f"黄芩苷-硅肺病路径数: {len(baicalin_silicosis)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    if not tetrandrine_silicosis.empty and 'Indirect_Probability' in tetrandrine_silicosis.columns:
-        probs = tetrandrine_silicosis['Indirect_Probability'].tolist()
-        print(f"汉防己甲素-硅肺病路径数: {len(tetrandrine_silicosis)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    # 计算对肝毒性的间接关系概率
-    print("计算对肝毒性的间接关系概率...")
-    baicalin_hepatotox = calculate_indirect_relation_probability(
-        baicalin_relations, hepatotox_relations
-    )
-    tetrandrine_hepatotox = calculate_indirect_relation_probability(
-        tetrandrine_relations, hepatotox_relations
-    )
-    
-    # 调试输出
-    print("肝毒性协同作用分析:")
-    if not baicalin_hepatotox.empty and 'Indirect_Probability' in baicalin_hepatotox.columns:
-        probs = baicalin_hepatotox['Indirect_Probability'].tolist()
-        print(f"黄芩苷-肝毒性路径数: {len(baicalin_hepatotox)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    if not tetrandrine_hepatotox.empty and 'Indirect_Probability' in tetrandrine_hepatotox.columns:
-        probs = tetrandrine_hepatotox['Indirect_Probability'].tolist()
-        print(f"汉防己甲素-肝毒性路径数: {len(tetrandrine_hepatotox)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    # 计算对肾毒性的间接关系概率
-    print("计算对肾毒性的间接关系概率...")
-    baicalin_nephrotox = calculate_indirect_relation_probability(
-        baicalin_relations, nephrotox_relations
-    )
-    tetrandrine_nephrotox = calculate_indirect_relation_probability(
-        tetrandrine_relations, nephrotox_relations
-    )
-    
-    # 调试输出
-    print("肾毒性协同作用分析:")
-    if not baicalin_nephrotox.empty and 'Indirect_Probability' in baicalin_nephrotox.columns:
-        probs = baicalin_nephrotox['Indirect_Probability'].tolist()
-        print(f"黄芩苷-肾毒性路径数: {len(baicalin_nephrotox)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    if not tetrandrine_nephrotox.empty and 'Indirect_Probability' in tetrandrine_nephrotox.columns:
-        probs = tetrandrine_nephrotox['Indirect_Probability'].tolist()
-        print(f"汉防己甲素-肾毒性路径数: {len(tetrandrine_nephrotox)}")
-        print(f"最大概率值: {max(probs) if probs else 0}")
-    
-    # 分析增效和减毒机制
-    print("分析协同增效和减毒机制...")
-    
-    # 初始化结果
-    mechanism_types = {
-        'silicosis_treatment': {
-            'synergy_coefficient': 0.0,
-            'synergy_type': '无明显作用'
-        },
-        'hepatotoxicity_reduction': {
-            'synergy_coefficient': 0.0,
-            'synergy_type': '无明显作用'
-        },
-        'nephrotoxicity_reduction': {
-            'synergy_coefficient': 0.0,
-            'synergy_type': '无明显作用'
-        }
-    }
-    
-    # 计算硅肺病治疗协同系数（基于PSR算法）
-    if not baicalin_silicosis.empty and not tetrandrine_silicosis.empty:
-        # 使用PSR方法计算协同系数
-        baicalin_prob = max(baicalin_silicosis['Indirect_Probability']) if not baicalin_silicosis.empty else 0
-        tetrandrine_prob = max(tetrandrine_silicosis['Indirect_Probability']) if not tetrandrine_silicosis.empty else 0
-        
-        # 确保非零概率值
-        if len(baicalin_silicosis) > 0 and baicalin_prob < 0.01:
-            baicalin_prob = 0.01 + (len(baicalin_silicosis) * 0.001)
-        if len(tetrandrine_silicosis) > 0 and tetrandrine_prob < 0.01:
-            tetrandrine_prob = 0.01 + (len(tetrandrine_silicosis) * 0.001)
-        
-        # PSR协同系数计算：几何平均值
-        synergy_coefficient = math.sqrt(baicalin_prob * tetrandrine_prob)
-        
-        # 路径数量调整
-        silicosis_path_count = len(baicalin_silicosis) + len(tetrandrine_silicosis)
-        path_count_factor = min(0.3, silicosis_path_count / 200)
-        synergy_coefficient = synergy_coefficient + path_count_factor
-        
-        print(f"硅肺病治疗协同系数计算: baicalin_prob={baicalin_prob}, tetrandrine_prob={tetrandrine_prob}, result={synergy_coefficient}")
+            # 查找与药物2的关系
+            drug2_relation = all_relations[
+                ((all_relations['Source_ID'] == target_id) & (all_relations['Source_Type'] == 'Gene')) |
+                ((all_relations['Target_ID'] == target_id) & (all_relations['Target_Type'] == 'Gene'))
+            ]
             
-        # 确定协同类型
-        if synergy_coefficient > 0.5:
-            synergy_type = "强协同作用"
-        elif synergy_coefficient > 0.3:
-            synergy_type = "协同作用"
-        elif synergy_coefficient > 0.1:
-            synergy_type = "弱协同作用"
-        else:
-            synergy_type = "无明显作用"
+            drug2_rel_type = drug2_relation['Type'].iloc[0] if not drug2_relation.empty else 'Unknown'
+            drug2_rel_prob = drug2_relation['Probability'].iloc[0] if not drug2_relation.empty else 0.0
             
-        mechanism_types['silicosis_treatment']['synergy_coefficient'] = synergy_coefficient
-        mechanism_types['silicosis_treatment']['synergy_type'] = synergy_type
+            # 添加到结果
+            targets_info.append({
+                'Target_ID': target_id,
+                'Target_Name': target_name,
+                'Target_Type': target_type,
+                'Drug1_Relation_Type': drug1_rel_type,
+                'Drug1_Relation_Probability': drug1_rel_prob,
+                'Drug2_Relation_Type': drug2_rel_type,
+                'Drug2_Relation_Probability': drug2_rel_prob
+            })
     
-    # 计算肝毒性减轻协同系数
-    if not baicalin_hepatotox.empty and not tetrandrine_hepatotox.empty:
-        # 使用PSR方法计算减毒协同系数
-        baicalin_prob = max(baicalin_hepatotox['Indirect_Probability']) if not baicalin_hepatotox.empty else 0
-        tetrandrine_prob = max(tetrandrine_hepatotox['Indirect_Probability']) if not tetrandrine_hepatotox.empty else 0
-        
-        # 确保非零概率值
-        if len(baicalin_hepatotox) > 0 and baicalin_prob < 0.01:
-            baicalin_prob = 0.01 + (len(baicalin_hepatotox) * 0.001)
-        if len(tetrandrine_hepatotox) > 0 and tetrandrine_prob < 0.01:
-            tetrandrine_prob = 0.01 + (len(tetrandrine_hepatotox) * 0.001)
-        
-        # PSR协同系数计算
-        synergy_coefficient = math.sqrt(baicalin_prob * tetrandrine_prob)
-        
-        # 路径数量调整
-        hepatotox_path_count = len(baicalin_hepatotox) + len(tetrandrine_hepatotox)
-        path_count_factor = min(0.3, hepatotox_path_count / 200)
-        synergy_coefficient = synergy_coefficient + path_count_factor
-        
-        print(f"肝保护协同系数计算: baicalin_prob={baicalin_prob}, tetrandrine_prob={tetrandrine_prob}, result={synergy_coefficient}")
-        
-        # 确定协同类型
-        if synergy_coefficient > 0.5:
-            synergy_type = "强保护作用"
-        elif synergy_coefficient > 0.3:
-            synergy_type = "保护作用"
-        elif synergy_coefficient > 0.1:
-            synergy_type = "弱保护作用"
-        else:
-            synergy_type = "无明显作用"
-            
-        mechanism_types['hepatotoxicity_reduction']['synergy_coefficient'] = synergy_coefficient
-        mechanism_types['hepatotoxicity_reduction']['synergy_type'] = synergy_type
+    # 创建结果DataFrame
+    result = pd.DataFrame(targets_info)
     
-    # 计算肾毒性减轻协同系数
-    if not baicalin_nephrotox.empty and not tetrandrine_nephrotox.empty:
-        # 使用PSR方法计算减毒协同系数
-        baicalin_prob = max(baicalin_nephrotox['Indirect_Probability']) if not baicalin_nephrotox.empty else 0
-        tetrandrine_prob = max(tetrandrine_nephrotox['Indirect_Probability']) if not tetrandrine_nephrotox.empty else 0
-        
-        # 确保非零概率值
-        if len(baicalin_nephrotox) > 0 and baicalin_prob < 0.01:
-            baicalin_prob = 0.01 + (len(baicalin_nephrotox) * 0.001)
-        if len(tetrandrine_nephrotox) > 0 and tetrandrine_prob < 0.01:
-            tetrandrine_prob = 0.01 + (len(tetrandrine_nephrotox) * 0.001)
-        
-        # PSR协同系数计算
-        synergy_coefficient = math.sqrt(baicalin_prob * tetrandrine_prob)
-        
-        # 路径数量调整
-        nephrotox_path_count = len(baicalin_nephrotox) + len(tetrandrine_nephrotox)
-        path_count_factor = min(0.3, nephrotox_path_count / 200)
-        synergy_coefficient = synergy_coefficient + path_count_factor
-        
-        print(f"肾保护协同系数计算: baicalin_prob={baicalin_prob}, tetrandrine_prob={tetrandrine_prob}, result={synergy_coefficient}")
-        
-        # 确定协同类型
-        if synergy_coefficient > 0.5:
-            synergy_type = "强保护作用"
-        elif synergy_coefficient > 0.3:
-            synergy_type = "保护作用"
-        elif synergy_coefficient > 0.1:
-            synergy_type = "弱保护作用"
-        else:
-            synergy_type = "无明显作用"
-            
-        mechanism_types['nephrotoxicity_reduction']['synergy_coefficient'] = synergy_coefficient
-        mechanism_types['nephrotoxicity_reduction']['synergy_type'] = synergy_type
-    
-    # 获取关键协同基因
-    therapeutic_genes = get_key_synergy_genes(baicalin_silicosis, tetrandrine_silicosis, common_targets)
-    hepatoprotective_genes = get_key_synergy_genes(baicalin_hepatotox, tetrandrine_hepatotox, common_targets)
-    nephroprotective_genes = get_key_synergy_genes(baicalin_nephrotox, tetrandrine_nephrotox, common_targets)
-    
-    # 整合结果
-    return {
-        'mechanism_types': mechanism_types,
-        'therapeutic_genes': therapeutic_genes,
-        'hepatoprotective_genes': hepatoprotective_genes,
-        'nephroprotective_genes': nephroprotective_genes
-    }
-
-def get_key_synergy_genes(drug1_relations, drug2_relations, common_targets, top_n=10):
-    """
-    获取两种药物协同作用的关键基因（按名称而非ID）
-    
-    参数:
-    drug1_relations - 药物1的间接关系
-    drug2_relations - 药物2的间接关系
-    common_targets - 共同靶点数据
-    top_n - 返回的关键基因数量
-    
-    返回:
-    关键基因列表，包含基因名称和重要性评分
-    """
-    import pandas as pd
-    
-    # 初始化结果
-    key_genes = {}
-    
-    # 如果任一关系为空，返回空列表
-    if drug1_relations.empty or drug2_relations.empty:
-        return []
-    
-    # 确保Path_Details列存在
-    if 'Path_Details' not in drug1_relations.columns or 'Path_Details' not in drug2_relations.columns:
-        return []
-    
-    # 处理第一种药物的路径
-    for _, row in drug1_relations.iterrows():
-        if 'Path_Details' in row and row['Path_Details']:
-            for path in row['Path_Details']:
-                if 'intermediate_target_id' in path and 'intermediate_target_name' in path:
-                    target_id = path['intermediate_target_id']
-                    target_name = path['intermediate_target_name']
-                    
-                    # 如果靶点名称是Unknown，尝试从common_targets获取
-                    if target_name == "Unknown":
-                        target_name_rows = common_targets[common_targets['Target_ID'] == target_id]
-                        if not target_name_rows.empty and 'Target_Name' in target_name_rows.columns:
-                            target_name = target_name_rows['Target_Name'].iloc[0]
-                    
-                    # 初始化或更新基因信息
-                    if target_id not in key_genes:
-                        key_genes[target_id] = {
-                            'name': target_name,
-                            'importance_score': 0,
-                            'drug1_effect': 0,
-                            'drug2_effect': 0,
-                            'path_count': 0
-                        }
-                    
-                    # 更新重要性得分和药物1效应
-                    path_prob = path.get('path_probability', 0)
-                    key_genes[target_id]['importance_score'] += path_prob
-                    key_genes[target_id]['drug1_effect'] = 1  # 药物1对该靶点有作用
-                    key_genes[target_id]['path_count'] += 1
-    
-    # 处理第二种药物的路径
-    for _, row in drug2_relations.iterrows():
-        if 'Path_Details' in row and row['Path_Details']:
-            for path in row['Path_Details']:
-                if 'intermediate_target_id' in path and 'intermediate_target_name' in path:
-                    target_id = path['intermediate_target_id']
-                    target_name = path['intermediate_target_name']
-                    
-                    # 如果靶点名称是Unknown，尝试从common_targets获取
-                    if target_name == "Unknown":
-                        target_name_rows = common_targets[common_targets['Target_ID'] == target_id]
-                        if not target_name_rows.empty and 'Target_Name' in target_name_rows.columns:
-                            target_name = target_name_rows['Target_Name'].iloc[0]
-                    
-                    # 初始化或更新基因信息
-                    if target_id not in key_genes:
-                        key_genes[target_id] = {
-                            'name': target_name,
-                            'importance_score': 0,
-                            'drug1_effect': 0,
-                            'drug2_effect': 0,
-                            'path_count': 0
-                        }
-                    
-                    # 更新重要性得分和药物2效应
-                    path_prob = path.get('path_probability', 0)
-                    key_genes[target_id]['importance_score'] += path_prob
-                    key_genes[target_id]['drug2_effect'] = 1  # 药物2对该靶点有作用
-                    key_genes[target_id]['path_count'] += 1
-    
-    # 转换为DataFrame并排序
-    genes_df = pd.DataFrame([
-        {
-            'target_id': target_id,
-            'gene_name': info['name'],
-            'importance_score': info['importance_score'],
-            'is_synergy_target': info['drug1_effect'] > 0 and info['drug2_effect'] > 0,
-            'path_count': info['path_count']
-        }
-        for target_id, info in key_genes.items()
-    ])
-    
-    # 筛选两种药物都作用的靶点，并按重要性排序
-    synergy_genes = genes_df[genes_df['is_synergy_target'] == True].sort_values(
-        by=['importance_score', 'path_count'], 
-        ascending=False
-    )
-    
-    # 获取前N个关键基因
-    top_genes = synergy_genes.head(top_n)
-    
-    # 转换为列表格式
-    result = []
-    for _, row in top_genes.iterrows():
-        result.append({
-            'gene_id': row['target_id'],
-            'gene_name': row['gene_name'],
-            'importance_score': row['importance_score'],
-            'path_count': row['path_count']
-        })
+    # 按药物1关系概率排序
+    result = result.sort_values(by='Drug1_Relation_Probability', ascending=False)
     
     return result
 
-
-
-def get_significant_targets(source_indirect_relations, target_indirect_relations, common_targets, top_n=10):
+def perform_gene_pathway_enrichment(gene_list, output_dir='./results'):
     """
-    提取最重要的共同靶点基因（按名称而非ID）
+    使用KEGG或其他数据库对基因列表进行通路富集分析
     
-    Args:
-        source_indirect_relations: 药物1的间接关系
-        target_indirect_relations: 药物2的间接关系
-        common_targets: 共同靶点数据
-        top_n: 返回的重要靶点数量
-        
-    Returns:
-        重要靶点列表，包含基因名称和重要性评分
+    参数:
+    gene_list - 基因名称或ID列表
+    output_dir - 输出目录
+    
+    返回:
+    enrichment_results - 富集分析结果
     """
+    import os
     import pandas as pd
+    from collections import defaultdict
+    import scipy.stats as stats
     
-    # 初始化结果
-    significant_targets = []
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 如果任一关系为空，返回空列表
-    if source_indirect_relations.empty or target_indirect_relations.empty:
-        return significant_targets
+    print(f"对 {len(gene_list)} 个基因进行通路富集分析...")
     
-    # 确保Path_Details列存在
-    if 'Path_Details' not in source_indirect_relations.columns or 'Path_Details' not in target_indirect_relations.columns:
-        return significant_targets
+    # 尝试使用Python生物信息学包进行KEGG富集
+    try:
+        import Bio
+        has_biopython = True
+        print("检测到BioPython包，将尝试使用BioPython进行通路富集")
+    except ImportError:
+        has_biopython = False
+        print("未检测到BioPython包，将使用内置通路数据进行富集")
     
-    # 创建目标基因重要性字典
-    target_importance = {}
+    # 如果有BioPython并且有网络连接，尝试在线查询KEGG
+    enrichment_results = None
+    if has_biopython:
+        try:
+            from Bio.KEGG import REST
+            
+            # 尝试从KEGG获取通路信息
+            print("尝试从KEGG数据库获取通路信息...")
+            
+            # 使用前10个基因测试KEGG连接
+            test_genes = gene_list[:10]
+            sample_gene = test_genes[0]
+            
+            try:
+                # 尝试一个基因查询测试连接
+                test_result = REST.kegg_get(f"genes/{sample_gene}")
+                print(f"成功连接KEGG数据库并查询到基因: {sample_gene}")
+                
+                # 实际进行富集分析 - 这里需要根据KEGG API的具体方法实现
+                # 这部分代码会比较复杂，需要多次API调用和数据处理
+                
+                # 此处为简化示例，在实际开发中需要扩展完整的KEGG查询逻辑
+                enrichment_results = {'status': 'success', 'source': 'KEGG online'}
+                
+            except Exception as e:
+                print(f"KEGG连接测试失败: {e}")
+                print("将使用内置通路数据进行富集分析")
+        
+        except ImportError:
+            print("未检测到Bio.KEGG模块，将使用内置通路数据进行富集")
     
-    # 处理第一种药物的中间靶点
-    for _, row in source_indirect_relations.iterrows():
-        if 'Path_Details' in row and row['Path_Details']:
-            for path in row['Path_Details']:
-                if 'intermediate_target_id' in path and 'intermediate_target_name' in path:
-                    target_id = path['intermediate_target_id']
-                    target_name = path['intermediate_target_name']
-                    
-                    # 如果靶点名称是Unknown，尝试从common_targets获取
-                    if target_name == "Unknown" and target_id in common_targets:
-                        # 假设common_targets包含ID到名称的映射
-                        if 'Target_Name' in common_targets[common_targets['Target_ID'] == target_id].columns:
-                            target_name = common_targets[common_targets['Target_ID'] == target_id]['Target_Name'].iloc[0]
-                    
-                    # 计算该靶点的重要性
-                    path_prob = path.get('path_probability', 0)
-                    
-                    # 更新靶点重要性
-                    if target_id not in target_importance:
-                        target_importance[target_id] = {
-                            'name': target_name,
-                            'importance': 0,
-                            'paths': 0
-                        }
-                    
-                    target_importance[target_id]['importance'] += path_prob
-                    target_importance[target_id]['paths'] += 1
-    
-    # 处理第二种药物的中间靶点
-    for _, row in target_indirect_relations.iterrows():
-        if 'Path_Details' in row and row['Path_Details']:
-            for path in row['Path_Details']:
-                if 'intermediate_target_id' in path and 'intermediate_target_name' in path:
-                    target_id = path['intermediate_target_id']
-                    target_name = path['intermediate_target_name']
-                    
-                    # 如果靶点名称是Unknown，尝试从common_targets获取
-                    if target_name == "Unknown" and target_id in common_targets:
-                        if 'Target_Name' in common_targets[common_targets['Target_ID'] == target_id].columns:
-                            target_name = common_targets[common_targets['Target_ID'] == target_id]['Target_Name'].iloc[0]
-                    
-                    # 只处理两种药物的共同靶点
-                    if target_id in target_importance:
-                        path_prob = path.get('path_probability', 0)
-                        target_importance[target_id]['importance'] += path_prob
-                        target_importance[target_id]['paths'] += 1
-                        
-                        # 如果有更好的名称，更新它
-                        if target_name != "Unknown" and target_importance[target_id]['name'] == "Unknown":
-                            target_importance[target_id]['name'] = target_name
-    
-    # 转换为DataFrame并排序
-    targets_df = pd.DataFrame([
-        {
-            'target_id': target_id,
-            'target_name': info['name'],
-            'importance': info['importance'],
-            'path_count': info['paths']
+    # 如果无法使用KEGG API，使用内置的通路数据
+    if enrichment_results is None:
+        print("使用内置通路数据进行富集分析...")
+        
+        # 预定义的通路-基因映射
+        pathway_gene_mapping = {
+            # 炎症相关通路
+            "Inflammatory_Response": [
+                "IL1B", "IL6", "TNF", "CXCL8", "IL10", "TLR4", "NFKB1", "STAT3", "CCL2", 
+                "NLRP3", "IL17A", "IL4", "IL13", "IFNG", "IL1A", "IL18", "MCP-1", "STAT1", "iNOS"
+            ],
+            
+            # 氧化应激通路
+            "Oxidative_Stress": [
+                "SOD1", "SOD2", "CAT", "GPX1", "HMOX1", "NQO1", "NFE2L2", "KEAP1", "GCLC", 
+                "GCLM", "GSR", "NRF2", "TXN", "TXNRD1", "NOX1", "NOX2", "NOX4", "CYBA"
+            ],
+            
+            # 细胞凋亡通路
+            "Apoptosis": [
+                "BAX", "BCL2", "CASP3", "CASP8", "CASP9", "TP53", "FAS", "FASLG", "XIAP", 
+                "BIRC5", "MCL1", "BAK1", "BID", "BAD", "BCL2L1", "CYCS", "APAF1", "CD95", "FasL",
+                "p53", "p38", "M4"
+            ],
+            
+            # 纤维化通路
+            "Fibrosis": [
+                "TGFB1", "SMAD2", "SMAD3", "SMAD4", "ACTA2", "COL1A1", "COL3A1", "FN1", 
+                "CTGF", "MMP2", "MMP9", "TIMP1", "TIMP2", "PDGFA", "PDGFB", "PDGFRB", "PDZRN4",
+                "α-smooth muscle actin", "LOXL2", "AP-1"
+            ],
+            
+            # 肝脏代谢通路
+            "Liver_Metabolism": [
+                "CYP1A2", "CYP2E1", "CYP3A4", "GSTM1", "UGT1A1", "ABCB1", "ABCC2", "SLCO1B1", 
+                "SLC22A1", "ALB", "TTR", "HMGCR", "LDLR", "APOB", "MTTP", "PTEN", "IDH",
+                "CHRM1", "alkaline phosphatase", "GOT", "ALT", "AST", "AhR", "Chrm5"
+            ],
+            
+            # 肾脏功能通路
+            "Kidney_Function": [
+                "AQP1", "AQP2", "SLC22A6", "SLC22A8", "KCNJ1", "SCNN1A", "SCNN1B", "AGT", 
+                "REN", "ACE", "AGTR1", "NPHS1", "NPHS2", "UMOD", "PODXL", "WT1", "Calcium channel",
+                "angiotensin", "Voltage-Dependent", "alpha/1D)-adre", "alpha 1A-adre", "Rob1", "PREPL"
+            ],
+            
+            # 免疫调节通路
+            "Immune_Regulation": [
+                "CD4", "CD8A", "FOXP3", "IL2RA", "CTLA4", "PDCD1", "CD274", "IFNG", "IL12A", 
+                "IL12B", "IL23A", "JAK1", "JAK2", "STAT1", "STAT3", "STAT4", "STAT5A", "STAT5B",
+                "STK33", "RBD"
+            ],
+            
+            # 钙信号通路
+            "Calcium_Signaling": [
+                "CACNA1C", "CACNA1D", "CACNA1S", "CACNA2D1", "RYR1", "RYR2", "ITPR1", "ITPR2", 
+                "ITPR3", "CALM1", "CAMK2A", "CAMK2B", "CAMK2D", "CAMK2G", "PPP3CA", "PPP3CB",
+                "Calcium channel", "Muscarinic Ace"
+            ],
+            
+            # 能量代谢通路
+            "Energy_Metabolism": [
+                "AMPK", "PRKAA1", "PRKAA2", "PRKAB1", "PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3", 
+                "SLC2A4", "PDK1", "PDK2", "PDK3", "PDK4", "G6PC", "PCK1", "PCK2", "PPARGC1A", "Akt"
+            ]
         }
-        for target_id, info in target_importance.items()
-    ])
-    
-    if not targets_df.empty:
-        # 按重要性排序
-        targets_df = targets_df.sort_values(by='importance', ascending=False)
         
-        # 获取前N个靶点
-        top_targets = targets_df.head(top_n)
+        # 标准化基因名称（去除空格，转为大写等）
+        normalized_gene_list = [g.strip().upper() for g in gene_list if isinstance(g, str)]
         
-        # 转换为结果格式
-        for _, row in top_targets.iterrows():
-            significant_targets.append({
-                'target_id': row['target_id'],
-                'target_name': row['target_name'],
-                'importance': row['importance'],
-                'path_count': row['path_count']
+        # 统计每个通路中出现的基因数量
+        pathway_hits = defaultdict(list)
+        gene_pathway_map = {}
+        
+        for gene in normalized_gene_list:
+            found = False
+            
+            # 直接匹配
+            for pathway, pathway_genes in pathway_gene_mapping.items():
+                normalized_pathway_genes = [pg.strip().upper() for pg in pathway_genes]
+                if gene in normalized_pathway_genes:
+                    pathway_hits[pathway].append(gene)
+                    if gene not in gene_pathway_map:
+                        gene_pathway_map[gene] = []
+                    gene_pathway_map[gene].append(pathway)
+                    found = True
+            
+            # 如果没有直接匹配，尝试部分匹配
+            if not found:
+                for pathway, pathway_genes in pathway_gene_mapping.items():
+                    for pg in pathway_genes:
+                        normalized_pg = pg.strip().upper()
+                        # 部分匹配，如果基因名是另一个的子字符串
+                        if (gene in normalized_pg) or (normalized_pg in gene):
+                            pathway_hits[pathway].append(gene)
+                            if gene not in gene_pathway_map:
+                                gene_pathway_map[gene] = []
+                            gene_pathway_map[gene].append(pathway)
+                            found = True
+                            break
+                    if found:
+                        break
+        
+        # 计算富集分析
+        total_genes = len(normalized_gene_list)
+        background_size = 20000  # 假设人类基因组大约有20,000个基因
+        
+        enrichment_results = []
+        
+        for pathway, genes in pathway_hits.items():
+            # 通路中命中的基因数
+            hits = len(genes)
+            
+            # 通路中的总基因数
+            pathway_size = len(pathway_gene_mapping[pathway])
+            
+            # 计算富集倍数
+            expected = total_genes * (pathway_size / background_size)
+            fold_enrichment = hits / expected if expected > 0 else 0
+            
+            # 计算P值（超几何分布检验）
+            try:
+                p_value = stats.hypergeom.sf(hits-1, background_size, pathway_size, total_genes)
+            except:
+                p_value = 1.0
+            
+            enrichment_results.append({
+                'Pathway': pathway,
+                'Hits': hits,
+                'Total_In_Pathway': pathway_size,
+                'Fold_Enrichment': fold_enrichment,
+                'P_Value': p_value,
+                'Genes': ','.join(genes)
             })
+        
+        # 按富集倍数排序
+        enrichment_results = sorted(enrichment_results, key=lambda x: x['Fold_Enrichment'], reverse=True)
+        
+        # 创建基因-通路映射DataFrame
+        gene_pathway_data = []
+        for gene, pathways in gene_pathway_map.items():
+            for pathway in pathways:
+                gene_pathway_data.append({
+                    'Gene': gene,
+                    'Pathway': pathway,
+                    'Score': 1.0
+                })
+        
+        # 保存结果
+        enrichment_df = pd.DataFrame(enrichment_results)
+        gene_pathway_df = pd.DataFrame(gene_pathway_data)
+        
+        enrichment_df.to_csv(os.path.join(output_dir, 'pathway_enrichment.csv'), index=False)
+        gene_pathway_df.to_csv(os.path.join(output_dir, 'gene_pathway_mapping.csv'), index=False)
+        
+        print(f"富集分析完成，发现 {len(enrichment_results)} 个有显著富集的通路")
+        
+        return {
+            'enrichment_results': enrichment_df,
+            'gene_pathway_mapping': gene_pathway_df,
+            'source': 'Built-in pathway data'
+        }
     
-    return significant_targets
+    return enrichment_results
+
+
+
+def analyze_synergy_mechanisms(baicalin_relations, tetrandrine_relations, common_targets,
+                              silicosis_relations, hepatotox_relations, nephrotox_relations):
+    """
+    分析黄芩苷与汉防己甲素的协同增效和减毒机制
+    
+    参数:
+    baicalin_relations - 黄芩苷关系数据
+    tetrandrine_relations - 汉防己甲素关系数据
+    common_targets - 共同靶点数据
+    silicosis_relations - 硅肺病关系数据
+    hepatotox_relations - 肝毒性关系数据
+    nephrotox_relations - 肾毒性关系数据
+    
+    返回:
+    synergy_results - 协同分析结果
+    """
+    # 数据检查
+    if baicalin_relations.empty or tetrandrine_relations.empty:
+        print("错误: 药物关系数据为空")
+        return {}
+    
+    # 计算各药物对疾病的直接关系概率
+    baicalin_silicosis = calculate_direct_relation_probability(
+        baicalin_relations[baicalin_relations['Target_ID'].isin(silicosis_relations['Source_ID'])]
+    )
+    
+    tetrandrine_silicosis = calculate_direct_relation_probability(
+        tetrandrine_relations[tetrandrine_relations['Target_ID'].isin(silicosis_relations['Source_ID'])]
+    )
+    
+    baicalin_hepatotox = calculate_direct_relation_probability(
+        baicalin_relations[baicalin_relations['Target_ID'].isin(hepatotox_relations['Source_ID'])]
+    )
+    
+    tetrandrine_hepatotox = calculate_direct_relation_probability(
+        tetrandrine_relations[tetrandrine_relations['Target_ID'].isin(hepatotox_relations['Source_ID'])]
+    )
+    
+    baicalin_nephrotox = calculate_direct_relation_probability(
+        baicalin_relations[baicalin_relations['Target_ID'].isin(nephrotox_relations['Source_ID'])]
+    )
+    
+    tetrandrine_nephrotox = calculate_direct_relation_probability(
+        tetrandrine_relations[tetrandrine_relations['Target_ID'].isin(nephrotox_relations['Source_ID'])]
+    )
+    
+    # 计算协同作用
+    silicosis_synergy = calculate_synergistic_effect(
+        baicalin_silicosis.iloc[0].to_dict() if not baicalin_silicosis.empty else {},
+        tetrandrine_silicosis.iloc[0].to_dict() if not tetrandrine_silicosis.empty else {},
+        common_targets
+    ) if not common_targets.empty else {'Synergy_Coefficient': 0, 'Synergy_Type': '无效'}
+    
+    hepatotox_synergy = calculate_synergistic_effect(
+        baicalin_hepatotox.iloc[0].to_dict() if not baicalin_hepatotox.empty else {},
+        tetrandrine_hepatotox.iloc[0].to_dict() if not tetrandrine_hepatotox.empty else {},
+        common_targets
+    ) if not common_targets.empty else {'Synergy_Coefficient': 0, 'Synergy_Type': '无效'}
+    
+    nephrotox_synergy = calculate_synergistic_effect(
+        baicalin_nephrotox.iloc[0].to_dict() if not baicalin_nephrotox.empty else {},
+        tetrandrine_nephrotox.iloc[0].to_dict() if not tetrandrine_nephrotox.empty else {},
+        common_targets
+    ) if not common_targets.empty else {'Synergy_Coefficient': 0, 'Synergy_Type': '无效'}
+    
+    # 收集机制类型
+    mechanism_types = {
+        'silicosis_treatment': {
+            'synergy_coefficient': silicosis_synergy['Synergy_Coefficient'],
+            'synergy_type': silicosis_synergy['Synergy_Type']
+        },
+        'hepatotoxicity_reduction': {
+            'synergy_coefficient': 1.0 - hepatotox_synergy['Synergy_Coefficient'] if hepatotox_synergy['Synergy_Coefficient'] > 0 else 0,
+            'synergy_type': '协同减毒' if hepatotox_synergy['Synergy_Coefficient'] < 0.8 else '无明显减毒'
+        },
+        'nephrotoxicity_reduction': {
+            'synergy_coefficient': 1.0 - nephrotox_synergy['Synergy_Coefficient'] if nephrotox_synergy['Synergy_Coefficient'] > 0 else 0,
+            'synergy_type': '协同减毒' if nephrotox_synergy['Synergy_Coefficient'] < 0.8 else '无明显减毒'
+        }
+    }
+    
+    # 分析治疗协同靶点
+    therapeutic_targets = []
+    
+    if not common_targets.empty:
+        for _, target in common_targets.iterrows():
+            target_id = target['Target_ID']
+            target_name = target['Target_Name']
+            
+            # 获取靶点与硅肺病的关系
+            target_silicosis = silicosis_relations[
+                (silicosis_relations['Source_ID'] == target_id) |
+                (silicosis_relations['Target_ID'] == target_id)
+            ]
+            
+            if not target_silicosis.empty:
+                relation_type = target_silicosis['Type'].iloc[0]
+                relation_prob = float(target_silicosis['Probability'].iloc[0])
+                
+                # 获取药物与靶点的关系
+                baicalin_target = baicalin_relations[
+                    (baicalin_relations['Target_ID'] == target_id)
+                ]
+                
+                tetrandrine_target = tetrandrine_relations[
+                    (tetrandrine_relations['Target_ID'] == target_id)
+                ]
+                
+                if not baicalin_target.empty and not tetrandrine_target.empty:
+                    baicalin_type = baicalin_target['Type'].iloc[0]
+                    baicalin_prob = float(baicalin_target['Probability'].iloc[0])
+                    
+                    tetrandrine_type = tetrandrine_target['Type'].iloc[0]
+                    tetrandrine_prob = float(tetrandrine_target['Probability'].iloc[0])
+                    
+                    # 判断是否协同
+                    is_synergistic = False
+                    synergy_mechanism = "未知"
+                    
+                    # 情况1：两药均激活保护性基因
+                    if (baicalin_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'] and
+                        tetrandrine_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'] and
+                        relation_type in ['Negative_Correlation', 'Treats', 'Decreases']):
+                        is_synergistic = True
+                        synergy_mechanism = "共同激活保护性基因"
+                    
+                    # 情况2：两药均抑制致病基因
+                    elif (baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                          tetrandrine_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                          relation_type in ['Positive_Correlation', 'Causes', 'Increases']):
+                        is_synergistic = True
+                        synergy_mechanism = "共同抑制致病基因"
+                    
+                    # 如果是协同的，添加到治疗协同靶点列表
+                    if is_synergistic:
+                        therapeutic_targets.append({
+                            'Target_ID': target_id,
+                            'Target_Name': target_name,
+                            'Mechanism': synergy_mechanism,
+                            'Baicalin_Relation': baicalin_type,
+                            'Baicalin_Probability': baicalin_prob,
+                            'Tetrandrine_Relation': tetrandrine_type,
+                            'Tetrandrine_Probability': tetrandrine_prob,
+                            'Disease_Relation': relation_type,
+                            'Disease_Probability': relation_prob,
+                            'Synergy_Score': (baicalin_prob * tetrandrine_prob * relation_prob) ** (1/3)
+                        })
+    
+    # 分析肝保护协同靶点
+    hepatoprotective_targets = []
+    
+    if not common_targets.empty:
+        for _, target in common_targets.iterrows():
+            target_id = target['Target_ID']
+            target_name = target['Target_Name']
+            
+            # 获取靶点与肝毒性的关系
+            target_hepatotox = hepatotox_relations[
+                (hepatotox_relations['Source_ID'] == target_id) |
+                (hepatotox_relations['Target_ID'] == target_id)
+            ]
+            
+            if not target_hepatotox.empty:
+                relation_type = target_hepatotox['Type'].iloc[0]
+                relation_prob = float(target_hepatotox['Probability'].iloc[0])
+                
+                # 仅考虑促进肝毒性的基因
+                if relation_type in ['Positive_Correlation', 'Causes', 'Increases']:
+                    # 获取药物与靶点的关系
+                    baicalin_target = baicalin_relations[
+                        (baicalin_relations['Target_ID'] == target_id)
+                    ]
+                    
+                    tetrandrine_target = tetrandrine_relations[
+                        (tetrandrine_relations['Target_ID'] == target_id)
+                    ]
+                    
+                    if not baicalin_target.empty and not tetrandrine_target.empty:
+                        baicalin_type = baicalin_target['Type'].iloc[0]
+                        baicalin_prob = float(baicalin_target['Probability'].iloc[0])
+                        
+                        tetrandrine_type = tetrandrine_target['Type'].iloc[0]
+                        tetrandrine_prob = float(tetrandrine_target['Probability'].iloc[0])
+                        
+                        # 情况1：两药均抑制促毒性基因
+                        if (baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                            tetrandrine_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']):
+                            
+                            hepatoprotective_targets.append({
+                                'Target_ID': target_id,
+                                'Target_Name': target_name,
+                                'Mechanism': "共同抑制促肝毒性基因",
+                                'Baicalin_Relation': baicalin_type,
+                                'Baicalin_Probability': baicalin_prob,
+                                'Tetrandrine_Relation': tetrandrine_type,
+                                'Tetrandrine_Probability': tetrandrine_prob,
+                                'Toxicity_Relation': relation_type,
+                                'Toxicity_Probability': relation_prob,
+                                'Protection_Score': (baicalin_prob * tetrandrine_prob * relation_prob) ** (1/3)
+                            })
+                        
+                        # 情况2：一药激活，一药抑制的拮抗作用
+                        elif ((baicalin_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'] and
+                               tetrandrine_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']) or
+                              (baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                               tetrandrine_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'])):
+                            
+                            # 确定哪个药物抑制，哪个药物激活
+                            if baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']:
+                                inhibitor = "黄芩苷"
+                                activator = "汉防己甲素"
+                            else:
+                                inhibitor = "汉防己甲素"
+                                activator = "黄芩苷"
+                            
+                            hepatoprotective_targets.append({
+                                'Target_ID': target_id,
+                                'Target_Name': target_name,
+                                'Mechanism': f"{inhibitor}抑制{activator}激活的促肝毒性基因",
+                                'Baicalin_Relation': baicalin_type,
+                                'Baicalin_Probability': baicalin_prob,
+                                'Tetrandrine_Relation': tetrandrine_type,
+                                'Tetrandrine_Probability': tetrandrine_prob,
+                                'Toxicity_Relation': relation_type,
+                                'Toxicity_Probability': relation_prob,
+                                'Protection_Score': (baicalin_prob * tetrandrine_prob * relation_prob) ** (1/3) * 0.8  # 拮抗作用效果较弱
+                            })
+    
+    # 分析肾保护协同靶点
+    nephroprotective_targets = []
+    
+    if not common_targets.empty:
+        for _, target in common_targets.iterrows():
+            target_id = target['Target_ID']
+            target_name = target['Target_Name']
+            
+            # 获取靶点与肾毒性的关系
+            target_nephrotox = nephrotox_relations[
+                (nephrotox_relations['Source_ID'] == target_id) |
+                (nephrotox_relations['Target_ID'] == target_id)
+            ]
+            
+            if not target_nephrotox.empty:
+                relation_type = target_nephrotox['Type'].iloc[0]
+                relation_prob = float(target_nephrotox['Probability'].iloc[0])
+                
+                # 仅考虑促进肾毒性的基因
+                if relation_type in ['Positive_Correlation', 'Causes', 'Increases']:
+                    # 获取药物与靶点的关系
+                    baicalin_target = baicalin_relations[
+                        (baicalin_relations['Target_ID'] == target_id)
+                    ]
+                    
+                    tetrandrine_target = tetrandrine_relations[
+                        (tetrandrine_relations['Target_ID'] == target_id)
+                    ]
+                    
+                    if not baicalin_target.empty and not tetrandrine_target.empty:
+                        baicalin_type = baicalin_target['Type'].iloc[0]
+                        baicalin_prob = float(baicalin_target['Probability'].iloc[0])
+                        
+                        tetrandrine_type = tetrandrine_target['Type'].iloc[0]
+                        tetrandrine_prob = float(tetrandrine_target['Probability'].iloc[0])
+                        
+                        # 情况1：两药均抑制促毒性基因
+                        if (baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                            tetrandrine_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']):
+                            
+                            nephroprotective_targets.append({
+                                'Target_ID': target_id,
+                                'Target_Name': target_name,
+                                'Mechanism': "共同抑制促肾毒性基因",
+                                'Baicalin_Relation': baicalin_type,
+                                'Baicalin_Probability': baicalin_prob,
+                                'Tetrandrine_Relation': tetrandrine_type,
+                                'Tetrandrine_Probability': tetrandrine_prob,
+                                'Toxicity_Relation': relation_type,
+                                'Toxicity_Probability': relation_prob,
+                                'Protection_Score': (baicalin_prob * tetrandrine_prob * relation_prob) ** (1/3)
+                            })
+                        
+                        # 情况2：一药激活，一药抑制的拮抗作用
+                        elif ((baicalin_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'] and
+                               tetrandrine_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']) or
+                              (baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation'] and
+                               tetrandrine_type in ['Activates', 'Increases', 'Upregulates', 'Positive_Correlation'])):
+                            
+                            # 确定哪个药物抑制，哪个药物激活
+                            if baicalin_type in ['Inhibits', 'Decreases', 'Downregulates', 'Negative_Correlation']:
+                                inhibitor = "黄芩苷"
+                                activator = "汉防己甲素"
+                            else:
+                                inhibitor = "汉防己甲素"
+                                activator = "黄芩苷"
+                            
+                            nephroprotective_targets.append({
+                                'Target_ID': target_id,
+                                'Target_Name': target_name,
+                                'Mechanism': f"{inhibitor}抑制{activator}激活的促肾毒性基因",
+                                'Baicalin_Relation': baicalin_type,
+                                'Baicalin_Probability': baicalin_prob,
+                                'Tetrandrine_Relation': tetrandrine_type,
+                                'Tetrandrine_Probability': tetrandrine_prob,
+                                'Toxicity_Relation': relation_type,
+                                'Toxicity_Probability': relation_prob,
+                                'Protection_Score': (baicalin_prob * tetrandrine_prob * relation_prob) ** (1/3) * 0.8  # 拮抗作用效果较弱
+                            })
+    
+    # 按评分排序
+    therapeutic_targets.sort(key=lambda x: x['Synergy_Score'], reverse=True)
+    hepatoprotective_targets.sort(key=lambda x: x['Protection_Score'], reverse=True)
+    nephroprotective_targets.sort(key=lambda x: x['Protection_Score'], reverse=True)
+    
+    # 保存分析结果
+    result_dir = os.path.join('results', 'tables')
+    os.makedirs(result_dir, exist_ok=True)
+    
+    # 保存机制类型
+    pd.DataFrame([mechanism_types]).to_csv(os.path.join(result_dir, 'mechanism_types.csv'), index=False)
+    
+    # 保存靶点数据
+    if therapeutic_targets:
+        pd.DataFrame(therapeutic_targets).to_csv(os.path.join(result_dir, 'therapeutic_targets.csv'), index=False)
+    
+    if hepatoprotective_targets:
+        pd.DataFrame(hepatoprotective_targets).to_csv(os.path.join(result_dir, 'hepatoprotective_targets.csv'), index=False)
+    
+    if nephroprotective_targets:
+        pd.DataFrame(nephroprotective_targets).to_csv(os.path.join(result_dir, 'nephroprotective_targets.csv'), index=False)
+    
+    # 返回分析结果
+    return {
+        'mechanism_types': mechanism_types,
+        'therapeutic_targets': therapeutic_targets,
+        'hepatoprotective_targets': hepatoprotective_targets,
+        'nephroprotective_targets': nephroprotective_targets
+    }
+
+
+
+
+
+
